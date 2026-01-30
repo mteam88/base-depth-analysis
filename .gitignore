@@ -1,0 +1,7 @@
+.env
+target
+data
+snapshots
+dist
+node_modules
+.git.bak

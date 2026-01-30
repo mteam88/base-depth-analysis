@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Depth Atlas | Base Liquidity</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header class="hero">
+      <div class="hero-text">
+        <span class="tag">Base L2 Depth Laboratory</span>
+        <h1>Depth Atlas</h1>
+        <p>
+          A live, venue-aware liquidity map for Base. Compare native pools, aggregators,
+          and unified routing in a single, stepped cost curve.
+        </p>
+        <div class="meta" id="snapshot-meta">
+          Waiting for snapshot...
+        </div>
+      </div>
+      <div class="hero-actions">
+        <div class="card">
+          <div class="card-title">Venues</div>
+          <div id="venue-toggle" class="chips"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">Depth Targets</div>
+          <div id="depth-table" class="depth-table"></div>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="chart-card">
+        <div class="chart-header">
+          <div>
+            <h2>Liquidity Shape</h2>
+            <span class="sub">x = price (quote per base) · y = cumulative base</span>
+          </div>
+          <div class="stat-grid" id="market-stats"></div>
+        </div>
+        <div id="chart"></div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="status" id="status">Connecting…</div>
+      <div class="credits">Depth Atlas · built for rapid quoting intuition</div>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
