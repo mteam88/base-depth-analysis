@@ -102,4 +102,12 @@ sol! {
 
         function aggregate(Call[] memory calls) external payable returns (uint256 blockNumber, bytes[] memory returnData);
     }
+
+    #[sol(rpc)]
+    interface ITesseraSwap {
+        function tesseraSwapViewAmounts(address tokenIn, address tokenOut, int256 amountSpecified)
+            external
+            view
+            returns (uint256 amountIn, uint256 amountOut);
+    }
 }

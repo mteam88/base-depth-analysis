@@ -30,6 +30,25 @@ cargo run -p base-depth-cli -- serve --interval 15
 
 Then open `http://localhost:8080`.
 
+## TesseraSwap integration
+
+The TesseraSwap view function is wired as a black‑box quote source. Configure via CLI or env:
+
+```
+# Env (defaults to known Base addresses if not set)
+TESSERA_SWAP=0x55555522005BcAE1c2424D474BfD5ed477749E3e
+TESSERA_ENGINE=0x31e99e05fee3dce580af777c3fd63ee1b3b40c17
+TESSERA_TREASURY=0x3dbe077e7986657e95e1cc50089f17a5a4af0aae
+# Optional: set msg.sender for the view call
+TESSERA_SENDER=0x0000000000000000000000000000000000000001
+```
+
+```
+cargo run -p base-depth-cli -- snapshot --venues tessera
+```
+
+If Tessera engine requires a specific sender, pass `--tessera-sender`.
+
 ## Performance tips
 
 - Kyber API sampling is the slowest part. Defaults now use `--kyber-concurrency 8` and no adaptive refinement. You can tune:

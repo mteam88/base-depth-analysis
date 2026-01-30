@@ -13,7 +13,9 @@ use base_depth_core::snapshot::{
 };
 use base_depth_core::types::{PairInfo, QuoteContext, Side, Venue};
 use base_depth_evm::discovery::{discover_simulators, SimulatorEntry, DEFAULT_V3_FEES};
-use base_depth_evm::{Addresses, KyberConfig, KyberQuoteEngine, RpcContext};
+use base_depth_evm::{
+    Addresses, KyberConfig, KyberQuoteEngine, RpcContext, TesseraConfig, TesseraQuoteEngine,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dotenvy::dotenv;
 use serde::Serialize;
@@ -89,6 +91,14 @@ struct CommonArgs {
     kyber_adaptive_bps: f64,
     #[arg(long, default_value_t = 8)]
     kyber_concurrency: usize,
+    #[arg(long)]
+    tessera_swap: Option<String>,
+    #[arg(long)]
+    tessera_engine: Option<String>,
+    #[arg(long)]
+    tessera_treasury: Option<String>,
+    #[arg(long)]
+    tessera_sender: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -280,9 +290,6 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
     };
 
     let venues = resolve_venues(&common.venues)?;
-    if venues.contains(&Venue::TesseraSwap) {
-        warn!("tessera venue selected but not implemented yet");
-    }
     let v3_fees = if common.v3_fees.is_empty() {
         DEFAULT_V3_FEES.to_vec()
     } else {
@@ -492,6 +499,88 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
         }
     }
 
+    if venues.contains(&Venue::TesseraSwap) {
+        let tessera_cfg = resolve_tessera_config(common)?;
+        let tessera_engine =
+            TesseraQuoteEngine::new(ctx.provider.clone(), tessera_cfg.swap, tessera_cfg.sender);
+        let ctx_quote = QuoteContext {
+            chain_id: ctx.chain_id,
+            block_number: Some(block_number),
+        };
+        let adaptive = None;
+        for side in &sides {
+            let schedule = if *side == Side::Bid {
+                &schedule_bid
+            } else {
+                &schedule_ask
+            };
+            let (token_in, token_out, dec_in, dec_out) = if *side == Side::Ask {
+                (quote.address, base.address, quote.decimals, base.decimals)
+            } else {
+                (base.address, quote.address, base.decimals, quote.decimals)
+            };
+            let curve = build_curve_from_quote_engine(
+                &tessera_engine,
+                &ctx_quote,
+                Venue::TesseraSwap,
+                "TESSERA",
+                schedule,
+                *side,
+                (token_in, dec_in),
+                (token_out, dec_out),
+                4,
+                adaptive,
+            )
+            .await?;
+            curves.push(curve);
+        }
+        venue_info.push(VenueInfo {
+            venue: Venue::TesseraSwap,
+            pool: "TESSERA".to_string(),
+        });
+    }
+
+    if venues.contains(&Venue::TesseraSwap) {
+        let tessera_cfg = resolve_tessera_config(common)?;
+        let tessera_engine =
+            TesseraQuoteEngine::new(ctx.provider.clone(), tessera_cfg.swap, tessera_cfg.sender);
+        let ctx_quote = QuoteContext {
+            chain_id: ctx.chain_id,
+            block_number: Some(block_number),
+        };
+        let adaptive = None;
+        for side in &sides {
+            let schedule = if *side == Side::Bid {
+                &schedule_bid
+            } else {
+                &schedule_ask
+            };
+            let (token_in, token_out, dec_in, dec_out) = if *side == Side::Ask {
+                (quote.address, base.address, quote.decimals, base.decimals)
+            } else {
+                (base.address, quote.address, base.decimals, quote.decimals)
+            };
+            let curve = build_curve_from_quote_engine(
+                &tessera_engine,
+                &ctx_quote,
+                Venue::TesseraSwap,
+                "TESSERA",
+                schedule,
+                *side,
+                (token_in, dec_in),
+                (token_out, dec_out),
+                4,
+                adaptive,
+            )
+            .await?;
+            curves.push(curve);
+        }
+        venue_info.push(VenueInfo {
+            venue: Venue::TesseraSwap,
+            pool: "TESSERA".to_string(),
+        });
+    }
+
     let meta = SnapshotMeta {
         chain_id: ctx.chain_id,
         block_number,
@@ -535,8 +624,7 @@ fn resolve_address(
     } else {
         std::env::var(env_key)?
     };
-    Ok(alloy_primitives::Address::parse_checksummed(&raw, None)
-        .unwrap_or_else(|_| raw.parse().expect("invalid address")))
+    parse_address(&raw)
 }
 
 fn resolve_venues(values: &[String]) -> anyhow::Result<Vec<Venue>> {
@@ -660,6 +748,55 @@ fn build_kyber_config(common: &CommonArgs) -> KyberConfig {
     cfg.included_sources = included;
     cfg.excluded_sources = excluded;
     cfg
+}
+
+fn resolve_tessera_config(common: &CommonArgs) -> anyhow::Result<TesseraConfig> {
+    if let Some(swap) = &common.tessera_swap {
+        let swap = parse_address(swap)?;
+        let treasury = match &common.tessera_treasury {
+            Some(value) => Some(parse_address(value)?),
+            None => std::env::var("TESSERA_TREASURY")
+                .ok()
+                .and_then(|v| parse_address(&v).ok()),
+        };
+        let engine = match &common.tessera_engine {
+            Some(value) => Some(parse_address(value)?),
+            None => std::env::var("TESSERA_ENGINE")
+                .ok()
+                .and_then(|v| parse_address(&v).ok()),
+        };
+        let sender = match &common.tessera_sender {
+            Some(value) => Some(parse_address(value)?),
+            None => std::env::var("TESSERA_SENDER")
+                .ok()
+                .and_then(|v| parse_address(&v).ok()),
+        };
+        return Ok(TesseraConfig {
+            swap,
+            treasury,
+            engine,
+            sender,
+        });
+    }
+
+    if let Some(cfg) = TesseraConfig::from_env() {
+        return Ok(cfg);
+    }
+
+    let swap = parse_address("0x55555522005BcAE1c2424D474BfD5ed477749E3e")?;
+    let engine = parse_address("0x31e99e05fee3dce580af777c3fd63ee1b3b40c17").ok();
+    let treasury = parse_address("0x3dbe077e7986657e95e1cc50089f17a5a4af0aae").ok();
+    Ok(TesseraConfig {
+        swap,
+        treasury,
+        engine,
+        sender: None,
+    })
+}
+
+fn parse_address(value: &str) -> anyhow::Result<alloy_primitives::Address> {
+    Ok(alloy_primitives::Address::parse_checksummed(value, None)
+        .unwrap_or_else(|_| value.parse().expect("invalid address")))
 }
 
 fn parse_csv_list(input: &str) -> Vec<String> {
