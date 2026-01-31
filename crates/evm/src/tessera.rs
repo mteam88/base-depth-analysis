@@ -64,11 +64,8 @@ impl QuoteEngine for TesseraQuoteEngine {
             .map_err(|_| anyhow::anyhow!("amount_in too large for tessera int256"))?;
 
         let contract = ITesseraSwap::new(self.swap, self.provider.clone());
-        let mut call = contract.tesseraSwapViewAmounts(
-            request.token_in,
-            request.token_out,
-            amount_specified,
-        );
+        let mut call =
+            contract.tesseraSwapViewAmounts(request.token_in, request.token_out, amount_specified);
         if let Some(sender) = self.sender {
             call = call.from(sender);
         }

@@ -17,6 +17,24 @@ function venueLabel(venue) {
   return venue.replace(/_/g, ' ').toUpperCase();
 }
 
+function poolLabel(curve, short = false) {
+  if (!curve || !curve.pool) return '';
+  let label = String(curve.pool);
+  const prefix = `${curve.venue}:`;
+  if (label.startsWith(prefix)) {
+    label = label.slice(prefix.length);
+  }
+  if (short) {
+    const match = label.match(/0x[a-fA-F0-9]{40}/);
+    if (match) {
+      const addr = match[0];
+      const compact = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+      label = label.replace(addr, compact);
+    }
+  }
+  return label.split(':').join(' / ');
+}
+
 function updateStatus(text) {
   if (!state.statusEl) {
     state.statusEl = document.getElementById('status');
@@ -111,6 +129,11 @@ function renderChart(snapshot) {
   }
   const traces = curves.map((curve) => {
     const color = colorFor(curve.venue, curve.side);
+    const venueName = venueLabel(curve.venue);
+    const poolShort = poolLabel(curve, true);
+    const poolFull = poolLabel(curve, false) || poolShort || venueName;
+    const nameParts = [venueName, curve.side.toUpperCase()];
+    if (poolShort && poolShort.toUpperCase() !== venueName) nameParts.push(poolShort);
     return {
       x: curve.points.map((p) => p.price),
       y: curve.points.map((p) => p.cum_base),
@@ -122,8 +145,8 @@ function renderChart(snapshot) {
         shape: 'hv',
         dash: curve.side === 'bid' ? 'dot' : 'solid',
       },
-      name: `${venueLabel(curve.venue)} ${curve.side.toUpperCase()}`,
-      hovertemplate: 'Price %{x:.6f}<br>Depth %{y:.4f}<extra></extra>',
+      name: nameParts.join(' - '),
+      hovertemplate: `Pool ${poolFull}<br>Price %{x:.6f}<br>Depth %{y:.4f}<extra></extra>`,
     };
   });
 

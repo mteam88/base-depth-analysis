@@ -18,6 +18,14 @@ pub struct SimulatorEntry {
     pub simulator: Box<dyn StatefulSimulator>,
 }
 
+#[derive(Clone, Debug)]
+pub struct V3PoolEntry {
+    pub venue: Venue,
+    pub pool: Address,
+    pub fee: u32,
+    pub label: String,
+}
+
 pub async fn discover_simulators(
     ctx: &RpcContext,
     addresses: &Addresses,
@@ -147,6 +155,60 @@ pub async fn discover_simulators(
             }
             _ => {}
         }
+    }
+
+    Ok(entries)
+}
+
+pub async fn discover_v3_pools(
+    provider: Arc<crate::provider::RpcProvider>,
+    factory: Address,
+    base: &TokenInfo,
+    quote: &TokenInfo,
+    venue: Venue,
+    v3_fees: &[u32],
+    block: Option<u64>,
+) -> anyhow::Result<Vec<V3PoolEntry>> {
+    let factory_contract = IUniswapV3Factory::new(factory, provider.clone());
+    let mut entries = Vec::new();
+
+    for fee in v3_fees {
+        let pool_result = match block {
+            Some(block_number) => {
+                factory_contract
+                    .getPool(base.address, quote.address, U24::from(*fee))
+                    .block(block_id(block_number))
+                    .call()
+                    .await
+            }
+            None => {
+                factory_contract
+                    .getPool(base.address, quote.address, U24::from(*fee))
+                    .call()
+                    .await
+            }
+        };
+        let pool = match pool_result {
+            Ok(pool) => pool,
+            Err(err) => {
+                warn!(
+                    "failed to fetch pool for {} fee {}: {err}",
+                    venue.as_str(),
+                    fee
+                );
+                continue;
+            }
+        };
+        if pool.is_zero() {
+            continue;
+        }
+        let label = format!("{}:{:?}:{}bps", venue.as_str(), pool, fee);
+        entries.push(V3PoolEntry {
+            venue,
+            pool,
+            fee: *fee,
+            label,
+        });
     }
 
     Ok(entries)

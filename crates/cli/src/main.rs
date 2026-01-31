@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use alloy_primitives::Address;
 use base_depth_core::curve::{
     build_curve_from_quote_engine, build_curve_from_simulator, build_unified_curve, DepthCurve,
 };
@@ -11,10 +12,16 @@ use base_depth_core::schedule::{Spacing, StepSchedule};
 use base_depth_core::snapshot::{
     KyberFlags, SnapshotConfig, SnapshotMeta, SnapshotWriter, VenueInfo,
 };
-use base_depth_core::types::{PairInfo, QuoteContext, Side, Venue};
-use base_depth_evm::discovery::{discover_simulators, SimulatorEntry, DEFAULT_V3_FEES};
+use base_depth_core::types::{
+    PairInfo, QuoteContext, QuoteEngine, QuoteExactInRequest, Side, Venue,
+};
+use base_depth_core::utils::{amount_to_u256, u256_to_f64};
+use base_depth_evm::discovery::{
+    discover_simulators, discover_v3_pools, V3PoolEntry, DEFAULT_V3_FEES,
+};
 use base_depth_evm::{
     Addresses, KyberConfig, KyberQuoteEngine, RpcContext, TesseraConfig, TesseraQuoteEngine,
+    V3QuoterEngine,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dotenvy::dotenv;
@@ -57,8 +64,8 @@ struct CommonArgs {
     venues: Vec<String>,
     #[arg(long, default_value_t = 100.0)]
     max_base: f64,
-    #[arg(long)]
-    min_base: Option<f64>,
+    #[arg(long, default_value_t = 0.01)]
+    min_base: f64,
     #[arg(long, default_value_t = 64)]
     steps: usize,
     #[arg(long, value_enum, default_value_t = SpacingOpt::Geometric)]
@@ -69,6 +76,10 @@ struct CommonArgs {
     block: Option<u64>,
     #[arg(long, value_delimiter = ',')]
     v3_fees: Vec<u32>,
+    #[arg(long, default_value_t = false)]
+    v3_quoter: bool,
+    #[arg(long, default_value_t = 8)]
+    v3_quoter_concurrency: usize,
     #[arg(long)]
     mid_price: Option<f64>,
     #[arg(long)]
@@ -297,7 +308,8 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
     };
 
     let block = Some(block_number);
-    let discovery_venues: Vec<Venue> = venues
+    let use_v3_quoter = common.v3_quoter;
+    let mut discovery_venues: Vec<Venue> = venues
         .iter()
         .copied()
         .filter(|v| {
@@ -311,6 +323,9 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
             )
         })
         .collect();
+    if use_v3_quoter {
+        discovery_venues.retain(|v| !matches!(v, Venue::UniswapV3 | Venue::PancakeV3));
+    }
 
     let addresses = Addresses::base();
     let sim_entries = discover_simulators(
@@ -324,15 +339,108 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
     )
     .await?;
 
-    let mid_price = resolve_mid_price(common.mid_price, &sim_entries)?;
+    let mut v3_quoter_entries: Vec<V3PoolEntry> = Vec::new();
+    if use_v3_quoter {
+        if venues.contains(&Venue::UniswapV3) {
+            v3_quoter_entries.extend(
+                discover_v3_pools(
+                    ctx.provider.clone(),
+                    addresses.uniswap_v3_factory,
+                    &base,
+                    &quote,
+                    Venue::UniswapV3,
+                    &v3_fees,
+                    block,
+                )
+                .await?,
+            );
+        }
+        if venues.contains(&Venue::PancakeV3) {
+            v3_quoter_entries.extend(
+                discover_v3_pools(
+                    ctx.provider.clone(),
+                    addresses.pancake_v3_factory,
+                    &base,
+                    &quote,
+                    Venue::PancakeV3,
+                    &v3_fees,
+                    block,
+                )
+                .await?,
+            );
+        }
+    }
+
+    let mid_price = if let Some(value) = common.mid_price {
+        value
+    } else if let Some(entry) = sim_entries.first() {
+        let price = entry.simulator.mid_price()?;
+        if price > 0.0 { price } else { 1.0 }
+    } else if let Some(entry) = v3_quoter_entries.first() {
+        let quoter = match entry.venue {
+            Venue::UniswapV3 => addresses.uniswap_v3_quoter_v2,
+            Venue::PancakeV3 => addresses.pancake_v3_quoter_v2,
+            _ => Address::ZERO,
+        };
+        if quoter.is_zero() {
+            1.0
+        } else {
+            let engine =
+                V3QuoterEngine::new(ctx.provider.clone(), quoter, entry.fee, entry.venue);
+            let ctx_quote = QuoteContext {
+                chain_id: ctx.chain_id,
+                block_number: Some(block_number),
+            };
+            let probe = 0.01_f64;
+            let amount_in = amount_to_u256(probe, base.decimals);
+            match engine
+                .quote_exact_in(
+                    QuoteExactInRequest {
+                        token_in: base.address,
+                        token_out: quote.address,
+                        amount_in,
+                    },
+                    &ctx_quote,
+                )
+                .await
+            {
+                Ok(quote_result) => {
+                    let out_f64 = u256_to_f64(quote_result.amount_out, quote.decimals);
+                    if out_f64 > 0.0 {
+                        out_f64 / probe
+                    } else {
+                        1.0
+                    }
+                }
+                Err(err) => {
+                    warn!("failed to derive mid price from v3 quoter: {err:#}");
+                    1.0
+                }
+            }
+        }
+    } else {
+        1.0
+    };
     let spacing: Spacing = common.spacing.into();
-    let min_base = common
-        .min_base
-        .unwrap_or_else(|| (common.max_base / 1000.0).max(1e-6));
+    let mut min_base = common.min_base;
+    let mut max_base = common.max_base;
+    if min_base < 0.01 {
+        warn!("min_base {} below 0.01, clamping to 0.01", min_base);
+        min_base = 0.01;
+    }
+    if max_base > 100.0 {
+        warn!("max_base {} above 100, clamping to 100", max_base);
+        max_base = 100.0;
+    }
+    if max_base < min_base {
+        return Err(anyhow::anyhow!(
+            "max_base ({max_base}) must be >= min_base ({min_base})"
+        ));
+    }
 
     let schedule_bid = build_schedule(
         min_base,
-        common.max_base,
+        max_base,
         common.steps,
         spacing,
         Side::Bid,
@@ -340,7 +448,7 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
     );
     let schedule_ask = build_schedule(
         min_base,
-        common.max_base,
+        max_base,
         common.steps,
         spacing,
         Side::Ask,
@@ -370,6 +478,64 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
             let curve =
                 build_curve_from_simulator(entry.simulator.as_ref(), schedule, *side).await?;
             curves.push(curve);
+        }
+    }
+
+    if use_v3_quoter && !v3_quoter_entries.is_empty() {
+        let ctx_quote = QuoteContext {
+            chain_id: ctx.chain_id,
+            block_number: Some(block_number),
+        };
+        for entry in &v3_quoter_entries {
+            let quoter = match entry.venue {
+                Venue::UniswapV3 => addresses.uniswap_v3_quoter_v2,
+                Venue::PancakeV3 => addresses.pancake_v3_quoter_v2,
+                _ => continue,
+            };
+            let engine = V3QuoterEngine::new(ctx.provider.clone(), quoter, entry.fee, entry.venue);
+            let mut ok = true;
+            for side in &sides {
+                let schedule = if *side == Side::Bid {
+                    &schedule_bid
+                } else {
+                    &schedule_ask
+                };
+                let (token_in, token_out, dec_in, dec_out) = if *side == Side::Ask {
+                    (quote.address, base.address, quote.decimals, base.decimals)
+                } else {
+                    (base.address, quote.address, base.decimals, quote.decimals)
+                };
+                match build_curve_from_quote_engine(
+                    &engine,
+                    &ctx_quote,
+                    entry.venue,
+                    entry.label.as_str(),
+                    schedule,
+                    *side,
+                    (token_in, dec_in),
+                    (token_out, dec_out),
+                    common.v3_quoter_concurrency,
+                    None,
+                )
+                .await
+                {
+                    Ok(curve) => curves.push(curve),
+                    Err(err) => {
+                        warn!(
+                            "v3 quoter curve build failed ({:?} {:?}): {err:#}",
+                            entry.venue, side
+                        );
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                venue_info.push(VenueInfo {
+                    venue: entry.venue,
+                    pool: entry.label.clone(),
+                });
+            }
         }
     }
 
@@ -540,47 +706,6 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
         });
     }
 
-    if venues.contains(&Venue::TesseraSwap) {
-        let tessera_cfg = resolve_tessera_config(common)?;
-        let tessera_engine =
-            TesseraQuoteEngine::new(ctx.provider.clone(), tessera_cfg.swap, tessera_cfg.sender);
-        let ctx_quote = QuoteContext {
-            chain_id: ctx.chain_id,
-            block_number: Some(block_number),
-        };
-        let adaptive = None;
-        for side in &sides {
-            let schedule = if *side == Side::Bid {
-                &schedule_bid
-            } else {
-                &schedule_ask
-            };
-            let (token_in, token_out, dec_in, dec_out) = if *side == Side::Ask {
-                (quote.address, base.address, quote.decimals, base.decimals)
-            } else {
-                (base.address, quote.address, base.decimals, quote.decimals)
-            };
-            let curve = build_curve_from_quote_engine(
-                &tessera_engine,
-                &ctx_quote,
-                Venue::TesseraSwap,
-                "TESSERA",
-                schedule,
-                *side,
-                (token_in, dec_in),
-                (token_out, dec_out),
-                4,
-                adaptive,
-            )
-            .await?;
-            curves.push(curve);
-        }
-        venue_info.push(VenueInfo {
-            venue: Venue::TesseraSwap,
-            pool: "TESSERA".to_string(),
-        });
-    }
-
     let meta = SnapshotMeta {
         chain_id: ctx.chain_id,
         block_number,
@@ -590,7 +715,7 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
         venues: dedupe_venues(venue_info),
         config: SnapshotConfig {
             min_base,
-            max_base: common.max_base,
+            max_base,
             steps: common.steps,
             spacing: spacing_string(spacing),
             kyber_flags: if venues.contains(&Venue::Kyber) || venues.contains(&Venue::UnifiedKyber)
@@ -654,22 +779,6 @@ fn default_venues() -> Vec<Venue> {
         Venue::Unified,
         Venue::UnifiedKyber,
     ]
-}
-
-fn resolve_mid_price(
-    candidate: Option<f64>,
-    sim_entries: &[SimulatorEntry],
-) -> anyhow::Result<f64> {
-    if let Some(value) = candidate {
-        return Ok(value);
-    }
-    if let Some(entry) = sim_entries.first() {
-        let price = entry.simulator.mid_price()?;
-        if price > 0.0 {
-            return Ok(price);
-        }
-    }
-    Ok(1.0)
 }
 
 fn build_schedule(

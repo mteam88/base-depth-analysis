@@ -65,6 +65,13 @@ If Tessera engine requires a specific sender, pass `--tessera-sender`.
 --venues uniswap_v3,pancake_v3,slipstream,pancake_v2,aerodrome_v2,unified
 ```
 
+- To speed up v3 sampling, you can switch Uniswap/Pancake v3 to the Quoter v2 path:
+
+```
+--v3-quoter
+--v3-quoter-concurrency 16
+```
+
 ## Notes
 
 - Slipstream factories can revert on `getPool` if the address is not a CL factory on the connected chain. The system logs a warning and continues.
@@ -72,4 +79,3 @@ If Tessera engine requires a specific sender, pass `--tessera-sender`.
   - `KYBER_CLIENT_ID`, `KYBER_BASE_URL`
   - `KYBER_EXCLUDE_RFQ`, `KYBER_ONLY_DIRECT`, `KYBER_GAS_INCLUDE`
   - `KYBER_INCLUDED_SOURCES`, `KYBER_EXCLUDED_SOURCES`
-
