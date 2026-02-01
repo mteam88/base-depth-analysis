@@ -57,6 +57,7 @@ If Tessera engine requires a specific sender, pass `--tessera-sender`.
 --kyber-concurrency 8
 --kyber-adaptive-depth 2
 --kyber-adaptive-bps 30
+--kyber-steps 16
 ```
 
 - To skip Kyber for faster snapshots:
@@ -71,6 +72,21 @@ If Tessera engine requires a specific sender, pass `--tessera-sender`.
 --v3-quoter
 --v3-quoter-concurrency 16
 ```
+
+## Pool allowlist
+
+DEX pool discovery is filtered to a fixed allowlist, so only these pools will appear in snapshots:
+
+- `0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59`
+- `0xd0b53d9277642d899df5c87a3966a349a798f224`
+- `0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38`
+
+Kyber and Tessera curves are still available independently of this allowlist.
+
+## Kyber sampling steps
+
+Kyber uses fewer steps than the main schedule to stay under rate limits. By default it samples roughly half the
+requested steps, capped at 24 and floored at 6. Override with `--kyber-steps` if you need a specific count.
 
 ## Notes
 

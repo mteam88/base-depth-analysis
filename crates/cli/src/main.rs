@@ -1,10 +1,10 @@
+use alloy_primitives::Address;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use alloy_primitives::Address;
 use base_depth_core::curve::{
     build_curve_from_quote_engine, build_curve_from_simulator, build_unified_curve, DepthCurve,
 };
@@ -68,6 +68,8 @@ struct CommonArgs {
     min_base: f64,
     #[arg(long, default_value_t = 64)]
     steps: usize,
+    #[arg(long)]
+    kyber_steps: Option<usize>,
     #[arg(long, value_enum, default_value_t = SpacingOpt::Geometric)]
     spacing: SpacingOpt,
     #[arg(long, value_enum, default_value_t = SideOpt::Both)]
@@ -328,7 +330,8 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
     }
 
     let addresses = Addresses::base();
-    let sim_entries = discover_simulators(
+    let allowed_pools = allowed_pool_set();
+    let mut sim_entries = discover_simulators(
         &ctx,
         &addresses,
         &base,
@@ -338,6 +341,10 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
         block,
     )
     .await?;
+    sim_entries.retain(|entry| allowed_pools.contains(&entry.pool));
+    if sim_entries.is_empty() {
+        warn!("no allowed DEX pools discovered; only Kyber/Tessera curves will render");
+    }
 
     let mut v3_quoter_entries: Vec<V3PoolEntry> = Vec::new();
     if use_v3_quoter {
@@ -370,12 +377,17 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
             );
         }
     }
+    v3_quoter_entries.retain(|entry| allowed_pools.contains(&entry.pool));
 
     let mid_price = if let Some(value) = common.mid_price {
         value
     } else if let Some(entry) = sim_entries.first() {
         let price = entry.simulator.mid_price()?;
-        if price > 0.0 { price } else { 1.0 }
+        if price > 0.0 {
+            price
+        } else {
+            1.0
+        }
     } else if let Some(entry) = v3_quoter_entries.first() {
         let quoter = match entry.venue {
             Venue::UniswapV3 => addresses.uniswap_v3_quoter_v2,
@@ -385,8 +397,7 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
         if quoter.is_zero() {
             1.0
         } else {
-            let engine =
-                V3QuoterEngine::new(ctx.provider.clone(), quoter, entry.fee, entry.venue);
+            let engine = V3QuoterEngine::new(ctx.provider.clone(), quoter, entry.fee, entry.venue);
             let ctx_quote = QuoteContext {
                 chain_id: ctx.chain_id,
                 block_number: Some(block_number),
@@ -450,6 +461,23 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
         min_base,
         max_base,
         common.steps,
+        spacing,
+        Side::Ask,
+        mid_price,
+    );
+    let kyber_steps = resolve_kyber_steps(common.steps, common.kyber_steps);
+    let schedule_kyber_bid = build_schedule(
+        min_base,
+        max_base,
+        kyber_steps,
+        spacing,
+        Side::Bid,
+        mid_price,
+    );
+    let schedule_kyber_ask = build_schedule(
+        min_base,
+        max_base,
+        kyber_steps,
         spacing,
         Side::Ask,
         mid_price,
@@ -582,9 +610,9 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
             let mut kyber_ok = true;
             for side in &sides {
                 let schedule = if *side == Side::Bid {
-                    &schedule_bid
+                    &schedule_kyber_bid
                 } else {
-                    &schedule_ask
+                    &schedule_kyber_ask
                 };
                 let (token_in, token_out, dec_in, dec_out) = if *side == Side::Ask {
                     (quote.address, base.address, quote.decimals, base.decimals)
@@ -625,9 +653,9 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
             let mut kyber_unified_ok = true;
             for side in &sides {
                 let schedule = if *side == Side::Bid {
-                    &schedule_bid
+                    &schedule_kyber_bid
                 } else {
-                    &schedule_ask
+                    &schedule_kyber_ask
                 };
                 let (token_in, token_out, dec_in, dec_out) = if *side == Side::Ask {
                     (quote.address, base.address, quote.decimals, base.decimals)
@@ -724,6 +752,12 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
             } else {
                 None
             },
+            kyber_steps: if venues.contains(&Venue::Kyber) || venues.contains(&Venue::UnifiedKyber)
+            {
+                Some(kyber_steps)
+            } else {
+                None
+            },
         },
     };
 
@@ -807,6 +841,15 @@ fn spacing_string(spacing: Spacing) -> String {
         Spacing::Linear => "linear".to_string(),
         Spacing::Geometric => "geometric".to_string(),
     }
+}
+
+fn resolve_kyber_steps(common_steps: usize, override_steps: Option<usize>) -> usize {
+    if let Some(override_steps) = override_steps {
+        return override_steps.max(1).min(common_steps.max(1));
+    }
+    let reduced = ((common_steps as f64) * 0.5).ceil() as usize;
+    let capped = reduced.min(24).max(6);
+    capped.min(common_steps.max(1))
 }
 
 fn build_kyber_config(common: &CommonArgs) -> KyberConfig {
@@ -906,6 +949,17 @@ fn resolve_tessera_config(common: &CommonArgs) -> anyhow::Result<TesseraConfig> 
 fn parse_address(value: &str) -> anyhow::Result<alloy_primitives::Address> {
     Ok(alloy_primitives::Address::parse_checksummed(value, None)
         .unwrap_or_else(|_| value.parse().expect("invalid address")))
+}
+
+fn allowed_pool_set() -> HashSet<Address> {
+    [
+        "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59",
+        "0xd0b53d9277642d899df5c87a3966a349a798f224",
+        "0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38",
+    ]
+    .into_iter()
+    .map(|addr| parse_address(addr).expect("invalid allowed pool address"))
+    .collect()
 }
 
 fn parse_csv_list(input: &str) -> Vec<String> {

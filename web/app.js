@@ -1,3 +1,9 @@
+const ALLOWED_POOLS = [
+  '0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59',
+  '0xd0b53d9277642d899df5c87a3966a349a798f224',
+  '0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38',
+];
+
 const state = {
   snapshot: null,
   selected: new Set(),
@@ -5,8 +11,12 @@ const state = {
   statusEl: null,
 };
 
-const askPalette = ['#c2410c', '#d97706', '#ef4444', '#f97316', '#b45309', '#ea580c'];
-const bidPalette = ['#0f766e', '#059669', '#22c55e', '#16a34a', '#14b8a6', '#15803d'];
+const askPalette = ['#c7542e', '#d97706', '#f97316', '#ea580c', '#b45309'];
+const bidPalette = ['#1f7a6b', '#0f766e', '#14b8a6', '#0ea5a5', '#0d9488'];
+
+function getCssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 function formatNumber(value, decimals = 4) {
   if (value === null || value === undefined || Number.isNaN(value)) return '—';
@@ -17,6 +27,22 @@ function venueLabel(venue) {
   return venue.replace(/_/g, ' ').toUpperCase();
 }
 
+function shortAddress(addr) {
+  if (!addr) return '';
+  const compact = addr.toLowerCase();
+  return `${compact.slice(0, 6)}...${compact.slice(-4)}`;
+}
+
+function extractAddress(value) {
+  if (!value) return null;
+  const match = String(value).match(/0x[a-fA-F0-9]{40}/);
+  return match ? match[0] : null;
+}
+
+function normalizeAddress(value) {
+  return value ? value.toLowerCase() : '';
+}
+
 function poolLabel(curve, short = false) {
   if (!curve || !curve.pool) return '';
   let label = String(curve.pool);
@@ -25,22 +51,28 @@ function poolLabel(curve, short = false) {
     label = label.slice(prefix.length);
   }
   if (short) {
-    const match = label.match(/0x[a-fA-F0-9]{40}/);
-    if (match) {
-      const addr = match[0];
-      const compact = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-      label = label.replace(addr, compact);
+    const addr = extractAddress(label);
+    if (addr) {
+      label = label.replace(addr, shortAddress(addr));
     }
   }
   return label.split(':').join(' / ');
 }
 
-function updateStatus(text) {
+function updateStatus(text, stateValue = 'loading') {
   if (!state.statusEl) {
     state.statusEl = document.getElementById('status');
   }
   if (state.statusEl) {
     state.statusEl.textContent = text;
+    state.statusEl.dataset.state = stateValue;
+  }
+}
+
+function updateClock(text) {
+  const clock = document.getElementById('snapshot-clock');
+  if (clock) {
+    clock.textContent = text;
   }
 }
 
@@ -55,12 +87,16 @@ function applySnapshot(snapshot) {
   updateMeta(snapshot.meta);
   const venues = Array.from(new Set(snapshot.curves.map((c) => c.venue)));
   if (state.selected.size === 0) {
-    const defaults = ['unified', 'kyber', 'unified_kyber'];
-    const picked = defaults.filter((v) => venues.includes(v));
-    if (picked.length > 0) {
-      picked.forEach((v) => state.selected.add(v));
-    } else {
+    if (venues.length <= 5) {
       venues.forEach((v) => state.selected.add(v));
+    } else {
+      const defaults = ['unified', 'kyber', 'tessera'];
+      const picked = defaults.filter((v) => venues.includes(v));
+      if (picked.length > 0) {
+        picked.forEach((v) => state.selected.add(v));
+      } else {
+        venues.forEach((v) => state.selected.add(v));
+      }
     }
   }
   state.venueIndex = Object.fromEntries(venues.map((v, idx) => [v, idx]));
@@ -68,13 +104,37 @@ function applySnapshot(snapshot) {
   renderChart(snapshot);
   renderStats(snapshot);
   renderDepthTable(snapshot);
+  renderPoolList(snapshot);
 }
 
 function updateMeta(meta) {
   const metaEl = document.getElementById('snapshot-meta');
   if (!metaEl) return;
   const time = new Date(meta.snapshot_time).toLocaleString();
-  metaEl.innerHTML = `Pair: <strong>${meta.pair.base.symbol}/${meta.pair.quote.symbol}</strong> · Block <strong>${meta.block_number}</strong> · ${time}`;
+  updateClock(`Last update: ${time}`);
+
+  const items = [
+    { label: 'Pair', value: `${meta.pair.base.symbol}/${meta.pair.quote.symbol}` },
+    { label: 'Block', value: formatNumber(meta.block_number, 0) },
+    { label: 'Snapshot', value: time },
+    { label: 'Venues', value: `${meta.venues.length}` },
+    { label: 'Steps', value: `${meta.config?.steps ?? '—'}` },
+  ];
+
+  if (meta.config?.kyber_steps) {
+    items.push({ label: 'Kyber steps', value: `${meta.config.kyber_steps}` });
+  }
+
+  metaEl.innerHTML = items
+    .map((item) => {
+      return `
+        <div class="meta-card">
+          <span class="meta-label">${item.label}</span>
+          <div class="meta-value">${item.value}</div>
+        </div>
+      `;
+    })
+    .join('');
 }
 
 function renderVenueChips(venues) {
@@ -113,9 +173,8 @@ function priceRange(curves) {
   if (prices.length < 2) return null;
   prices.sort((a, b) => a - b);
   const median = prices[Math.floor(prices.length / 2)];
-  // Keep prices within 10% of the median — anything beyond is an outlier pool
-  const lo = median * 0.9;
-  const hi = median * 1.1;
+  const lo = median * 0.88;
+  const hi = median * 1.12;
   const pad = (hi - lo) * 0.05;
   return [lo - pad, hi + pad];
 }
@@ -141,7 +200,7 @@ function renderChart(snapshot) {
       mode: 'lines',
       line: {
         color,
-        width: 2,
+        width: 2.2,
         shape: 'hv',
         dash: curve.side === 'bid' ? 'dot' : 'solid',
       },
@@ -160,18 +219,28 @@ function renderChart(snapshot) {
       x1: mid,
       y0: 0,
       y1: maxDepth,
-      line: { color: '#111827', width: 1, dash: 'dot' },
+      line: { color: '#1c1a16', width: 1, dash: 'dot' },
     });
   }
 
   const range = priceRange(curves);
   const layout = {
-    margin: { l: 60, r: 30, t: 20, b: 50 },
-    xaxis: { title: 'Price (quote / base)', gridcolor: 'rgba(0,0,0,0.05)', range },
-    yaxis: { title: 'Cumulative base', gridcolor: 'rgba(0,0,0,0.05)' },
+    margin: { l: 60, r: 30, t: 10, b: 50 },
+    xaxis: {
+      title: 'Price (quote per base)',
+      gridcolor: getCssVar('--chart-grid'),
+      range,
+      tickfont: { family: 'Space Mono, monospace', size: 11 },
+    },
+    yaxis: {
+      title: 'Cumulative base',
+      gridcolor: getCssVar('--chart-grid'),
+      tickfont: { family: 'Space Mono, monospace', size: 11 },
+    },
+    font: { family: 'Manrope, sans-serif', color: getCssVar('--ink') },
     paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor: 'rgba(255,255,255,0.6)',
-    legend: { orientation: 'h', y: -0.2 },
+    plot_bgcolor: getCssVar('--chart-bg'),
+    legend: { orientation: 'h', y: -0.2, font: { size: 10 } },
     shapes,
   };
 
@@ -219,8 +288,12 @@ function renderDepthTable(snapshot) {
   if (!table || !snapshot) return;
   const meta = snapshot.meta;
   const curves = snapshot.curves.filter((c) => state.selected.has(c.venue));
+  if (curves.length === 0) {
+    table.innerHTML = '<div class="depth-row">No active venues selected.</div>';
+    return;
+  }
   const maxBase = meta.config?.max_base || 100;
-  const levels = [0.001, 0.01, 0.05, 0.1, 0.25]
+  const levels = [0.0025, 0.01, 0.05, 0.1, 0.25]
     .map((ratio) => maxBase * ratio)
     .filter((v) => v > 0)
     .slice(0, 5);
@@ -232,7 +305,9 @@ function renderDepthTable(snapshot) {
     .map((level) => {
       const bidPrice = bestPriceAtDepth(bids, level, true);
       const askPrice = bestPriceAtDepth(asks, level, false);
-      const spread = bidPrice && askPrice ? ((askPrice - bidPrice) / ((askPrice + bidPrice) / 2)) * 10000 : null;
+      const spread = bidPrice && askPrice
+        ? ((askPrice - bidPrice) / ((askPrice + bidPrice) / 2)) * 10000
+        : null;
       return `
         <div class="depth-row">
           <div><strong>${formatNumber(level, 4)}</strong> ${meta.pair.base.symbol}</div>
@@ -265,10 +340,48 @@ function priceAtDepth(curve, depth) {
   return null;
 }
 
+function renderPoolList(snapshot) {
+  const container = document.getElementById('pool-list');
+  if (!container) return;
+  if (!snapshot) {
+    container.innerHTML = '<div class="pool-row missing"><div>Waiting for pools</div><div class="pool-status">OFF</div></div>';
+    return;
+  }
+  const poolMap = new Map();
+  snapshot.curves.forEach((curve) => {
+    const address = extractAddress(curve.pool);
+    if (!address) return;
+    const key = normalizeAddress(address);
+    if (!poolMap.has(key)) {
+      poolMap.set(key, { address, venues: new Set() });
+    }
+    poolMap.get(key).venues.add(curve.venue);
+  });
+
+  container.innerHTML = ALLOWED_POOLS.map((address) => {
+    const key = normalizeAddress(address);
+    const entry = poolMap.get(key);
+    const venues = entry
+      ? Array.from(entry.venues).map(venueLabel).join(', ')
+      : 'Not detected';
+    const rowClass = entry ? 'pool-row' : 'pool-row missing';
+    const status = entry ? 'LIVE' : 'OFF';
+    return `
+      <div class="${rowClass}">
+        <div>
+          <div class="pool-address">${shortAddress(address)}</div>
+          <div class="pool-venues">${venues}</div>
+        </div>
+        <div class="pool-status">${status}</div>
+      </div>
+    `;
+  }).join('');
+}
+
 function connectWs() {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${protocol}://${location.host}/ws`);
-  ws.onopen = () => updateStatus('Live feed connected');
+  ws.onopen = () => updateStatus('Live feed connected', 'ok');
   ws.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data);
@@ -278,19 +391,23 @@ function connectWs() {
     }
   };
   ws.onclose = () => {
-    updateStatus('Live feed disconnected · retrying…');
+    updateStatus('Live feed disconnected, retrying...', 'error');
     setTimeout(connectWs, 3000);
   };
 }
 
-(async () => {
-  updateStatus('Loading snapshot…');
-  try {
-    const snapshot = await fetchLatest();
-    applySnapshot(snapshot);
-    updateStatus('Snapshot loaded');
-  } catch (err) {
-    updateStatus('Waiting for first snapshot…');
-  }
-  connectWs();
+(function init() {
+  updateStatus('Loading snapshot...', 'loading');
+  renderPoolList(null);
+  fetchLatest()
+    .then((snapshot) => {
+      applySnapshot(snapshot);
+      updateStatus('Snapshot loaded', 'ok');
+    })
+    .catch(() => {
+      updateStatus('Waiting for first snapshot...', 'loading');
+    })
+    .finally(() => {
+      connectWs();
+    });
 })();

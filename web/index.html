@@ -3,52 +3,76 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Depth Atlas | Base Liquidity</title>
+  <title>Depth Forge | Base Liquidity</title>
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
 </head>
 <body>
-  <div id="app">
-    <header class="hero">
-      <div class="hero-text">
-        <span class="tag">Base L2 Depth Laboratory</span>
-        <h1>Depth Atlas</h1>
-        <p>
-          A live, venue-aware liquidity map for Base. Compare native pools, aggregators,
-          and unified routing in a single, stepped cost curve.
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="eyebrow">Base Liquidity Studio</span>
+        <h1>Depth Forge</h1>
+        <p class="tagline">
+          Live depth curves across Base pools and aggregators. Tune exposure, compare spreads,
+          and track the shape of liquidity with a single snapshot.
         </p>
-        <div class="meta" id="snapshot-meta">
-          Waiting for snapshot...
-        </div>
       </div>
-      <div class="hero-actions">
-        <div class="card">
-          <div class="card-title">Venues</div>
-          <div id="venue-toggle" class="chips"></div>
+      <div class="status-pill" id="status" data-state="loading">Connecting...</div>
+    </header>
+
+    <section class="overview">
+      <div class="overview-copy">
+        <div class="meta-grid" id="snapshot-meta">Waiting for snapshot...</div>
+      </div>
+      <div class="overview-panels">
+        <div class="panel">
+          <div class="panel-title">Market Pulse</div>
+          <div id="market-stats" class="stat-grid"></div>
         </div>
-        <div class="card">
-          <div class="card-title">Depth Targets</div>
+        <div class="panel">
+          <div class="panel-title">Depth Ladder</div>
           <div id="depth-table" class="depth-table"></div>
         </div>
       </div>
-    </header>
+    </section>
 
-    <main>
-      <section class="chart-card">
-        <div class="chart-header">
+    <section class="workspace">
+      <div class="panel chart-panel">
+        <div class="panel-head">
           <div>
-            <h2>Liquidity Shape</h2>
-            <span class="sub">x = price (quote per base) · y = cumulative base</span>
+            <h2>Liquidity Curve</h2>
+            <p class="sub">Price (quote per base) vs cumulative base depth</p>
           </div>
-          <div class="stat-grid" id="market-stats"></div>
+          <div class="legend">
+            <span class="legend-item"><span class="dot bid"></span>Bid</span>
+            <span class="legend-item"><span class="dot ask"></span>Ask</span>
+          </div>
         </div>
         <div id="chart"></div>
-      </section>
-    </main>
+      </div>
+      <aside class="rail">
+        <div class="panel">
+          <div class="panel-title">Venue Mix</div>
+          <div id="venue-toggle" class="chip-grid"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Pool Focus</div>
+          <div id="pool-list" class="pool-list"></div>
+        </div>
+        <div class="panel note">
+          <div class="panel-title">Notes</div>
+          <p>
+            Curves are step-sampled at the requested depth schedule. Kyber uses fewer steps to
+            stay under rate limits. Dex pools are hard filtered to the selected allowlist.
+          </p>
+        </div>
+      </aside>
+    </section>
 
-    <footer>
-      <div class="status" id="status">Connecting…</div>
-      <div class="credits">Depth Atlas · built for rapid quoting intuition</div>
+    <footer class="footer">
+      <div>Base Depth Analysis</div>
+      <div id="snapshot-clock">Waiting for data...</div>
     </footer>
   </div>
 

@@ -1,6 +1,6 @@
 use crate::contracts::IUniswapV3QuoterV2;
 use crate::provider::{block_id, RpcProvider};
-use alloy_primitives::aliases::{U24, U160};
+use alloy_primitives::aliases::{U160, U24};
 use alloy_primitives::Address;
 use base_depth_core::{Quote, QuoteContext, QuoteEngine, QuoteExactInRequest, Venue};
 use std::sync::Arc;

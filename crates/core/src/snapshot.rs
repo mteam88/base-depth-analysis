@@ -30,6 +30,7 @@ pub struct SnapshotConfig {
     pub steps: usize,
     pub spacing: String,
     pub kyber_flags: Option<KyberFlags>,
+    pub kyber_steps: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
