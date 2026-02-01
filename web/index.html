@@ -11,68 +11,60 @@
   <div class="app">
     <header class="topbar">
       <div class="brand">
-        <span class="eyebrow">Base Liquidity Studio</span>
+        <span class="badge">BASE L2</span>
         <h1>Depth Forge</h1>
-        <p class="tagline">
-          Live depth curves across Base pools and aggregators. Tune exposure, compare spreads,
-          and track the shape of liquidity with a single snapshot.
-        </p>
       </div>
-      <div class="status-pill" id="status" data-state="loading">Connecting...</div>
+      <div class="topbar-right">
+        <div class="meta-strip" id="snapshot-meta"></div>
+        <div class="status-pill" id="status" data-state="loading">Connecting</div>
+      </div>
     </header>
 
-    <section class="overview">
-      <div class="overview-copy">
-        <div class="meta-grid" id="snapshot-meta">Waiting for snapshot...</div>
-      </div>
-      <div class="overview-panels">
-        <div class="panel">
-          <div class="panel-title">Market Pulse</div>
-          <div id="market-stats" class="stat-grid"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-title">Depth Ladder</div>
-          <div id="depth-table" class="depth-table"></div>
-        </div>
-      </div>
+    <section class="stats-bar">
+      <div id="market-stats" class="stats-row"></div>
     </section>
 
-    <section class="workspace">
-      <div class="panel chart-panel">
-        <div class="panel-head">
-          <div>
-            <h2>Liquidity Curve</h2>
-            <p class="sub">Price (quote per base) vs cumulative base depth</p>
+    <section class="main-grid">
+      <div class="chart-container">
+        <div class="chart-header">
+          <div class="chart-title-group">
+            <h2>Liquidity Depth</h2>
+            <span class="chart-subtitle" id="pair-label"></span>
           </div>
-          <div class="legend">
-            <span class="legend-item"><span class="dot bid"></span>Bid</span>
-            <span class="legend-item"><span class="dot ask"></span>Ask</span>
+          <div class="chart-controls">
+            <div class="legend-inline">
+              <span class="leg"><span class="leg-line bid"></span>Bid</span>
+              <span class="leg"><span class="leg-line ask"></span>Ask</span>
+            </div>
+            <div class="scale-toggle" id="scale-toggle">
+              <button class="scale-btn active" data-mode="auto">Auto</button>
+              <button class="scale-btn" data-mode="tight">Tight</button>
+              <button class="scale-btn" data-mode="wide">Wide</button>
+            </div>
           </div>
         </div>
         <div id="chart"></div>
       </div>
-      <aside class="rail">
-        <div class="panel">
-          <div class="panel-title">Venue Mix</div>
-          <div id="venue-toggle" class="chip-grid"></div>
+
+      <aside class="sidebar">
+        <div class="sb-section">
+          <div class="sb-title">Venues</div>
+          <div id="venue-toggle" class="venue-grid"></div>
         </div>
-        <div class="panel">
-          <div class="panel-title">Pool Focus</div>
+        <div class="sb-section">
+          <div class="sb-title">Depth Ladder</div>
+          <div id="depth-table" class="depth-table"></div>
+        </div>
+        <div class="sb-section">
+          <div class="sb-title">Pools</div>
           <div id="pool-list" class="pool-list"></div>
-        </div>
-        <div class="panel note">
-          <div class="panel-title">Notes</div>
-          <p>
-            Curves are step-sampled at the requested depth schedule. Kyber uses fewer steps to
-            stay under rate limits. Dex pools are hard filtered to the selected allowlist.
-          </p>
         </div>
       </aside>
     </section>
 
     <footer class="footer">
-      <div>Base Depth Analysis</div>
-      <div id="snapshot-clock">Waiting for data...</div>
+      <span>Depth Forge</span>
+      <span id="snapshot-clock"></span>
     </footer>
   </div>
 

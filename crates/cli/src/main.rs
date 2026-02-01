@@ -434,14 +434,10 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
     };
     let spacing: Spacing = common.spacing.into();
     let mut min_base = common.min_base;
-    let mut max_base = common.max_base;
+    let max_base = common.max_base;
     if min_base < 0.01 {
         warn!("min_base {} below 0.01, clamping to 0.01", min_base);
         min_base = 0.01;
-    }
-    if max_base > 100.0 {
-        warn!("max_base {} above 100, clamping to 100", max_base);
-        max_base = 100.0;
     }
     if max_base < min_base {
         return Err(anyhow::anyhow!(
@@ -812,6 +808,7 @@ fn default_venues() -> Vec<Venue> {
         Venue::Kyber,
         Venue::Unified,
         Venue::UnifiedKyber,
+        Venue::TesseraSwap,
     ]
 }
 

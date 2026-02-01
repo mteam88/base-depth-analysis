@@ -8,73 +8,88 @@ const state = {
   snapshot: null,
   selected: new Set(),
   venueIndex: {},
-  statusEl: null,
+  scaleMode: 'auto',
 };
 
-const askPalette = ['#c7542e', '#d97706', '#f97316', '#ea580c', '#b45309'];
-const bidPalette = ['#1f7a6b', '#0f766e', '#14b8a6', '#0ea5a5', '#0d9488'];
+// Per-venue color mapping: each venue gets a unique hue, bid/ask use green/red tint
+const VENUE_COLORS = {
+  uniswap_v3:    { bid: '#22c55e', ask: '#ef4444' },
+  pancake_v3:    { bid: '#10b981', ask: '#f97316' },
+  slipstream:    { bid: '#14b8a6', ask: '#fb923c' },
+  pancake_v2:    { bid: '#06b6d4', ask: '#e879f9' },
+  aerodrome_v2:  { bid: '#3b82f6', ask: '#f472b6' },
+  unified:       { bid: '#f59e0b', ask: '#fbbf24' },
+  unified_kyber: { bid: '#d97706', ask: '#fcd34d' },
+  kyber:         { bid: '#06b6d4', ask: '#67e8f9' },
+  tessera:       { bid: '#a855f7', ask: '#c084fc' },
+};
 
-function getCssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const FALLBACK_BID = '#22c55e';
+const FALLBACK_ASK = '#ef4444';
+
+function venueColor(venue, side) {
+  const entry = VENUE_COLORS[venue];
+  if (entry) return side === 'bid' ? entry.bid : entry.ask;
+  return side === 'bid' ? FALLBACK_BID : FALLBACK_ASK;
 }
 
-function formatNumber(value, decimals = 4) {
-  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+function fmt(value, decimals = 4) {
+  if (value == null || Number.isNaN(value)) return '\u2014';
   return Number(value).toLocaleString(undefined, { maximumFractionDigits: decimals });
 }
 
 function venueLabel(venue) {
-  return venue.replace(/_/g, ' ').toUpperCase();
+  const labels = {
+    uniswap_v3: 'Uni V3',
+    pancake_v3: 'Cake V3',
+    pancake_v2: 'Cake V2',
+    slipstream: 'Slip',
+    aerodrome_v2: 'Aero V2',
+    unified: 'Unified',
+    unified_kyber: 'Uni+Kyber',
+    kyber: 'Kyber',
+    tessera: 'Tessera',
+  };
+  return labels[venue] || venue.replace(/_/g, ' ');
 }
 
-function shortAddress(addr) {
+function shortAddr(addr) {
   if (!addr) return '';
-  const compact = addr.toLowerCase();
-  return `${compact.slice(0, 6)}...${compact.slice(-4)}`;
+  const s = addr.toLowerCase();
+  return s.slice(0, 6) + '\u2026' + s.slice(-4);
 }
 
-function extractAddress(value) {
+function extractAddr(value) {
   if (!value) return null;
-  const match = String(value).match(/0x[a-fA-F0-9]{40}/);
-  return match ? match[0] : null;
-}
-
-function normalizeAddress(value) {
-  return value ? value.toLowerCase() : '';
+  const m = String(value).match(/0x[a-fA-F0-9]{40}/);
+  return m ? m[0] : null;
 }
 
 function poolLabel(curve, short = false) {
   if (!curve || !curve.pool) return '';
   let label = String(curve.pool);
-  const prefix = `${curve.venue}:`;
-  if (label.startsWith(prefix)) {
-    label = label.slice(prefix.length);
-  }
+  const prefix = curve.venue + ':';
+  if (label.startsWith(prefix)) label = label.slice(prefix.length);
   if (short) {
-    const addr = extractAddress(label);
-    if (addr) {
-      label = label.replace(addr, shortAddress(addr));
-    }
+    const addr = extractAddr(label);
+    if (addr) label = label.replace(addr, shortAddr(addr));
   }
   return label.split(':').join(' / ');
 }
 
+// ── Status & Clock ──
+
 function updateStatus(text, stateValue = 'loading') {
-  if (!state.statusEl) {
-    state.statusEl = document.getElementById('status');
-  }
-  if (state.statusEl) {
-    state.statusEl.textContent = text;
-    state.statusEl.dataset.state = stateValue;
-  }
+  const el = document.getElementById('status');
+  if (el) { el.textContent = text; el.dataset.state = stateValue; }
 }
 
 function updateClock(text) {
-  const clock = document.getElementById('snapshot-clock');
-  if (clock) {
-    clock.textContent = text;
-  }
+  const el = document.getElementById('snapshot-clock');
+  if (el) el.textContent = text;
 }
+
+// ── Data fetching ──
 
 async function fetchLatest() {
   const res = await fetch('/api/snapshots/latest');
@@ -82,24 +97,39 @@ async function fetchLatest() {
   return res.json();
 }
 
+function connectWs() {
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${protocol}://${location.host}/ws`);
+  ws.onopen = () => updateStatus('Live', 'ok');
+  ws.onmessage = (event) => {
+    try { applySnapshot(JSON.parse(event.data)); }
+    catch (err) { console.error(err); }
+  };
+  ws.onclose = () => {
+    updateStatus('Reconnecting', 'error');
+    setTimeout(connectWs, 3000);
+  };
+}
+
+// ── Snapshot application ──
+
 function applySnapshot(snapshot) {
   state.snapshot = snapshot;
-  updateMeta(snapshot.meta);
-  const venues = Array.from(new Set(snapshot.curves.map((c) => c.venue)));
+  const venues = [...new Set(snapshot.curves.map((c) => c.venue))];
+
   if (state.selected.size === 0) {
     if (venues.length <= 5) {
       venues.forEach((v) => state.selected.add(v));
     } else {
       const defaults = ['unified', 'kyber', 'tessera'];
       const picked = defaults.filter((v) => venues.includes(v));
-      if (picked.length > 0) {
-        picked.forEach((v) => state.selected.add(v));
-      } else {
-        venues.forEach((v) => state.selected.add(v));
-      }
+      (picked.length > 0 ? picked : venues).forEach((v) => state.selected.add(v));
     }
   }
-  state.venueIndex = Object.fromEntries(venues.map((v, idx) => [v, idx]));
+
+  state.venueIndex = Object.fromEntries(venues.map((v, i) => [v, i]));
+
+  updateMeta(snapshot.meta);
   renderVenueChips(venues);
   renderChart(snapshot);
   renderStats(snapshot);
@@ -107,35 +137,33 @@ function applySnapshot(snapshot) {
   renderPoolList(snapshot);
 }
 
+// ── Meta strip ──
+
 function updateMeta(meta) {
-  const metaEl = document.getElementById('snapshot-meta');
-  if (!metaEl) return;
-  const time = new Date(meta.snapshot_time).toLocaleString();
-  updateClock(`Last update: ${time}`);
+  const el = document.getElementById('snapshot-meta');
+  const pairLabel = document.getElementById('pair-label');
+  if (!meta) return;
 
-  const items = [
-    { label: 'Pair', value: `${meta.pair.base.symbol}/${meta.pair.quote.symbol}` },
-    { label: 'Block', value: formatNumber(meta.block_number, 0) },
-    { label: 'Snapshot', value: time },
-    { label: 'Venues', value: `${meta.venues.length}` },
-    { label: 'Steps', value: `${meta.config?.steps ?? '—'}` },
-  ];
+  const pair = `${meta.pair.base.symbol}/${meta.pair.quote.symbol}`;
+  const time = new Date(meta.snapshot_time).toLocaleTimeString();
 
-  if (meta.config?.kyber_steps) {
-    items.push({ label: 'Kyber steps', value: `${meta.config.kyber_steps}` });
+  if (pairLabel) pairLabel.textContent = pair;
+  updateClock(time);
+
+  if (el) {
+    const items = [
+      ['Block', fmt(meta.block_number, 0)],
+      ['Venues', meta.venues.length],
+      ['Steps', meta.config?.steps ?? '\u2014'],
+      ['Max', meta.config?.max_base ?? '\u2014'],
+    ];
+    el.innerHTML = items.map(([label, val]) =>
+      `<span class="meta-item"><span class="meta-label">${label}</span> <span class="meta-val">${val}</span></span>`
+    ).join('');
   }
-
-  metaEl.innerHTML = items
-    .map((item) => {
-      return `
-        <div class="meta-card">
-          <span class="meta-label">${item.label}</span>
-          <div class="meta-value">${item.value}</div>
-        </div>
-      `;
-    })
-    .join('');
 }
+
+// ── Venue chips ──
 
 function renderVenueChips(venues) {
   const container = document.getElementById('venue-toggle');
@@ -143,14 +171,12 @@ function renderVenueChips(venues) {
   container.innerHTML = '';
   venues.forEach((venue) => {
     const btn = document.createElement('button');
-    btn.className = `chip ${state.selected.has(venue) ? 'active' : ''}`;
+    const activeClass = state.selected.has(venue) ? ' active' : '';
+    // Add venue-specific class for special styling (tessera, kyber, unified)
+    btn.className = `venue-chip ${venue}${activeClass}`;
     btn.textContent = venueLabel(venue);
     btn.addEventListener('click', () => {
-      if (state.selected.has(venue)) {
-        state.selected.delete(venue);
-      } else {
-        state.selected.add(venue);
-      }
+      state.selected.has(venue) ? state.selected.delete(venue) : state.selected.add(venue);
       renderVenueChips(venues);
       renderChart(state.snapshot);
       renderStats(state.snapshot);
@@ -160,24 +186,70 @@ function renderVenueChips(venues) {
   });
 }
 
-function colorFor(venue, side) {
-  const idx = state.venueIndex[venue] ?? 0;
-  return side === 'ask'
-    ? askPalette[idx % askPalette.length]
-    : bidPalette[idx % bidPalette.length];
+// ── Intelligent Chart Scaling ──
+
+function computeRange(curves, mode) {
+  if (!curves.length) return null;
+
+  // Gather all prices across visible curves
+  const allPrices = [];
+  curves.forEach((c) => c.points.forEach((p) => {
+    if (p.price != null && isFinite(p.price)) allPrices.push(p.price);
+  }));
+  if (allPrices.length < 2) return null;
+
+  allPrices.sort((a, b) => a - b);
+
+  // Compute IQR-based range to handle outliers intelligently
+  const q1Idx = Math.floor(allPrices.length * 0.1);
+  const q3Idx = Math.floor(allPrices.length * 0.9);
+  const q1 = allPrices[q1Idx];
+  const q3 = allPrices[q3Idx];
+  const iqr = q3 - q1;
+  const median = allPrices[Math.floor(allPrices.length * 0.5)];
+
+  // Filter to "inlier" prices (within 2x IQR of Q1/Q3)
+  const inlierLo = q1 - 2 * iqr;
+  const inlierHi = q3 + 2 * iqr;
+  const inliers = allPrices.filter((p) => p >= inlierLo && p <= inlierHi);
+  const dataMin = inliers.length ? inliers[0] : allPrices[0];
+  const dataMax = inliers.length ? inliers[inliers.length - 1] : allPrices[allPrices.length - 1];
+
+  if (mode === 'tight') {
+    // Focus on the bid/ask spread area: tighter than auto
+    const spreadRange = dataMax - dataMin;
+    const pad = spreadRange * 0.15;
+    return [dataMin - pad, dataMax + pad];
+  }
+
+  if (mode === 'wide') {
+    // Show all data including outliers
+    const fullMin = allPrices[0];
+    const fullMax = allPrices[allPrices.length - 1];
+    const fullRange = fullMax - fullMin;
+    const pad = fullRange * 0.1;
+    return [fullMin - pad, fullMax + pad];
+  }
+
+  // Auto mode: IQR-adaptive scaling
+  // Use the inlier range as base, with proportional padding
+  const range = dataMax - dataMin;
+  if (range === 0) {
+    // All prices identical - use +/- 0.5% of median
+    const halfPct = median * 0.005;
+    return [median - halfPct, median + halfPct];
+  }
+
+  // Padding scales with the data spread relative to median
+  // Narrow spreads (like 0.1%) get more relative padding for visibility
+  // Wide spreads (like 5%) get less padding to avoid wasted space
+  const spreadPct = range / median;
+  const padFactor = spreadPct < 0.005 ? 0.5 : spreadPct < 0.02 ? 0.3 : 0.15;
+  const pad = range * padFactor;
+  return [dataMin - pad, dataMax + pad];
 }
 
-function priceRange(curves) {
-  const prices = [];
-  curves.forEach((c) => c.points.forEach((p) => prices.push(p.price)));
-  if (prices.length < 2) return null;
-  prices.sort((a, b) => a - b);
-  const median = prices[Math.floor(prices.length / 2)];
-  const lo = median * 0.88;
-  const hi = median * 1.12;
-  const pad = (hi - lo) * 0.05;
-  return [lo - pad, hi + pad];
-}
+// ── Chart rendering ──
 
 function renderChart(snapshot) {
   if (!snapshot) return;
@@ -186,13 +258,15 @@ function renderChart(snapshot) {
     Plotly.purge('chart');
     return;
   }
+
   const traces = curves.map((curve) => {
-    const color = colorFor(curve.venue, curve.side);
-    const venueName = venueLabel(curve.venue);
-    const poolShort = poolLabel(curve, true);
-    const poolFull = poolLabel(curve, false) || poolShort || venueName;
-    const nameParts = [venueName, curve.side.toUpperCase()];
-    if (poolShort && poolShort.toUpperCase() !== venueName) nameParts.push(poolShort);
+    const color = venueColor(curve.venue, curve.side);
+    const vName = venueLabel(curve.venue);
+    const pShort = poolLabel(curve, true);
+    const pFull = poolLabel(curve) || pShort || vName;
+    const parts = [vName, curve.side.toUpperCase()];
+    if (pShort && pShort.toUpperCase() !== vName.toUpperCase()) parts.push(pShort);
+
     return {
       x: curve.points.map((p) => p.price),
       y: curve.points.map((p) => p.cum_base),
@@ -200,57 +274,87 @@ function renderChart(snapshot) {
       mode: 'lines',
       line: {
         color,
-        width: 2.2,
+        width: curve.side === 'bid' ? 1.8 : 1.8,
         shape: 'hv',
-        dash: curve.side === 'bid' ? 'dot' : 'solid',
+        dash: curve.venue === 'tessera' ? 'dash' : 'solid',
       },
-      name: nameParts.join(' - '),
-      hovertemplate: `Pool ${poolFull}<br>Price %{x:.6f}<br>Depth %{y:.4f}<extra></extra>`,
+      name: parts.join(' \u00b7 '),
+      hovertemplate:
+        `<b>${vName}</b> ${curve.side}<br>` +
+        `Pool: ${pFull}<br>` +
+        `Price: %{x:.6f}<br>` +
+        `Depth: %{y:.4f}<extra></extra>`,
     };
   });
 
+  // Mid-price annotation
   const { bestBid, bestAsk, maxDepth } = bestPrices(curves);
   const shapes = [];
+  const annotations = [];
   if (bestBid && bestAsk) {
     const mid = (bestBid + bestAsk) / 2;
     shapes.push({
       type: 'line',
-      x0: mid,
-      x1: mid,
-      y0: 0,
-      y1: maxDepth,
-      line: { color: '#1c1a16', width: 1, dash: 'dot' },
+      x0: mid, x1: mid,
+      y0: 0, y1: maxDepth,
+      line: { color: 'rgba(255,255,255,0.15)', width: 1, dash: 'dot' },
+    });
+    annotations.push({
+      x: mid, y: maxDepth,
+      text: `Mid ${fmt(mid, 2)}`,
+      showarrow: false,
+      font: { size: 10, color: 'rgba(255,255,255,0.4)', family: 'JetBrains Mono' },
+      yshift: 10,
     });
   }
 
-  const range = priceRange(curves);
+  const range = computeRange(curves, state.scaleMode);
+
   const layout = {
-    margin: { l: 60, r: 30, t: 10, b: 50 },
+    margin: { l: 56, r: 16, t: 8, b: 44 },
     xaxis: {
-      title: 'Price (quote per base)',
-      gridcolor: getCssVar('--chart-grid'),
+      title: { text: 'Price', font: { size: 11, color: '#4b5563' } },
+      gridcolor: 'rgba(255,255,255,0.04)',
+      zerolinecolor: 'rgba(255,255,255,0.06)',
       range,
-      tickfont: { family: 'Space Mono, monospace', size: 11 },
+      tickfont: { family: 'JetBrains Mono, monospace', size: 10, color: '#6b7280' },
+      tickformat: ',.2f',
     },
     yaxis: {
-      title: 'Cumulative base',
-      gridcolor: getCssVar('--chart-grid'),
-      tickfont: { family: 'Space Mono, monospace', size: 11 },
+      title: { text: 'Cumulative Base', font: { size: 11, color: '#4b5563' } },
+      gridcolor: 'rgba(255,255,255,0.04)',
+      zerolinecolor: 'rgba(255,255,255,0.06)',
+      tickfont: { family: 'JetBrains Mono, monospace', size: 10, color: '#6b7280' },
     },
-    font: { family: 'Manrope, sans-serif', color: getCssVar('--ink') },
+    font: { family: 'Inter, sans-serif', color: '#e1e4e8' },
     paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor: getCssVar('--chart-bg'),
-    legend: { orientation: 'h', y: -0.2, font: { size: 10 } },
+    plot_bgcolor: '#0f1218',
+    legend: {
+      orientation: 'h',
+      y: -0.15,
+      x: 0.5,
+      xanchor: 'center',
+      font: { size: 10, color: '#6b7280' },
+      bgcolor: 'rgba(0,0,0,0)',
+    },
     shapes,
+    annotations,
+    hovermode: 'closest',
+    hoverlabel: {
+      bgcolor: '#1a1f2a',
+      bordercolor: 'rgba(255,255,255,0.1)',
+      font: { family: 'JetBrains Mono', size: 11, color: '#e1e4e8' },
+    },
   };
 
-  Plotly.react('chart', traces, layout, { displayModeBar: false, responsive: true });
+  Plotly.react('chart', traces, layout, {
+    displayModeBar: false,
+    responsive: true,
+  });
 }
 
 function bestPrices(curves) {
-  let bestBid = null;
-  let bestAsk = null;
-  let maxDepth = 0;
+  let bestBid = null, bestAsk = null, maxDepth = 0;
   curves.forEach((curve) => {
     if (!curve.points.length) return;
     const first = curve.points[0];
@@ -264,59 +368,60 @@ function bestPrices(curves) {
   return { bestBid, bestAsk, maxDepth };
 }
 
+// ── Stats bar ──
+
 function renderStats(snapshot) {
-  const statsEl = document.getElementById('market-stats');
-  if (!statsEl || !snapshot) return;
+  const el = document.getElementById('market-stats');
+  if (!el || !snapshot) return;
   const curves = snapshot.curves.filter((c) => state.selected.has(c.venue));
   const { bestBid, bestAsk } = bestPrices(curves);
   const mid = bestBid && bestAsk ? (bestBid + bestAsk) / 2 : null;
   const spreadBps = bestBid && bestAsk ? ((bestAsk - bestBid) / mid) * 10000 : null;
-  statsEl.innerHTML = [
-    statBlock('Best Bid', formatNumber(bestBid, 6)),
-    statBlock('Best Ask', formatNumber(bestAsk, 6)),
-    statBlock('Mid', formatNumber(mid, 6)),
-    statBlock('Spread bps', formatNumber(spreadBps, 2)),
+
+  el.innerHTML = [
+    stat('Best Bid', fmt(bestBid, 6), 'bid'),
+    stat('Best Ask', fmt(bestAsk, 6), 'ask'),
+    stat('Mid', fmt(mid, 6), 'mid'),
+    stat('Spread', spreadBps != null ? fmt(spreadBps, 2) + ' bps' : '\u2014', 'spread'),
   ].join('');
 }
 
-function statBlock(label, value) {
-  return `<div class="stat"><span>${label}</span><strong>${value}</strong></div>`;
+function stat(label, value, cls) {
+  return `<div class="stat-item"><span class="stat-label">${label}</span><span class="stat-val ${cls}">${value}</span></div>`;
 }
+
+// ── Depth ladder ──
 
 function renderDepthTable(snapshot) {
   const table = document.getElementById('depth-table');
   if (!table || !snapshot) return;
   const meta = snapshot.meta;
   const curves = snapshot.curves.filter((c) => state.selected.has(c.venue));
+
   if (curves.length === 0) {
-    table.innerHTML = '<div class="depth-row">No active venues selected.</div>';
+    table.innerHTML = '<div class="depth-row"><span class="depth-label">No venues selected</span></div>';
     return;
   }
-  const maxBase = meta.config?.max_base || 100;
-  const levels = [0.0025, 0.01, 0.05, 0.1, 0.25]
-    .map((ratio) => maxBase * ratio)
-    .filter((v) => v > 0)
-    .slice(0, 5);
 
+  const maxBase = meta.config?.max_base || 100;
+  const levels = [0.0025, 0.01, 0.05, 0.1, 0.25].map((r) => maxBase * r).filter((v) => v > 0).slice(0, 5);
   const bids = curves.filter((c) => c.side === 'bid');
   const asks = curves.filter((c) => c.side === 'ask');
 
-  table.innerHTML = levels
-    .map((level) => {
-      const bidPrice = bestPriceAtDepth(bids, level, true);
-      const askPrice = bestPriceAtDepth(asks, level, false);
-      const spread = bidPrice && askPrice
-        ? ((askPrice - bidPrice) / ((askPrice + bidPrice) / 2)) * 10000
-        : null;
-      return `
-        <div class="depth-row">
-          <div><strong>${formatNumber(level, 4)}</strong> ${meta.pair.base.symbol}</div>
-          <div>Bid ${formatNumber(bidPrice, 6)}</div>
-          <div>Ask ${formatNumber(askPrice, 6)} / ${formatNumber(spread, 2)} bps</div>
-        </div>
-      `;
-    })
-    .join('');
+  const header = `<div class="depth-row header"><span>Depth</span><span style="text-align:right">Bid</span><span style="text-align:right">Ask / Spread</span></div>`;
+
+  const rows = levels.map((level) => {
+    const bidP = bestPriceAtDepth(bids, level, true);
+    const askP = bestPriceAtDepth(asks, level, false);
+    const spread = bidP && askP ? ((askP - bidP) / ((askP + bidP) / 2)) * 10000 : null;
+    return `<div class="depth-row">
+      <span class="depth-label">${fmt(level, 4)}</span>
+      <span class="depth-bid">${fmt(bidP, 2)}</span>
+      <span class="depth-ask">${fmt(askP, 2)} <span class="depth-spread">${spread != null ? fmt(spread, 1) + 'bp' : ''}</span></span>
+    </div>`;
+  });
+
+  table.innerHTML = header + rows.join('');
 }
 
 function bestPriceAtDepth(curves, depth, isBid) {
@@ -324,88 +429,84 @@ function bestPriceAtDepth(curves, depth, isBid) {
   curves.forEach((curve) => {
     const price = priceAtDepth(curve, depth);
     if (price === null) return;
-    if (best === null) {
-      best = price;
-    } else {
-      best = isBid ? Math.max(best, price) : Math.min(best, price);
-    }
+    if (best === null) best = price;
+    else best = isBid ? Math.max(best, price) : Math.min(best, price);
   });
   return best;
 }
 
 function priceAtDepth(curve, depth) {
-  for (const point of curve.points) {
-    if (point.cum_base >= depth) return point.price;
+  for (const p of curve.points) {
+    if (p.cum_base >= depth) return p.price;
   }
   return null;
 }
+
+// ── Pool list ──
 
 function renderPoolList(snapshot) {
   const container = document.getElementById('pool-list');
   if (!container) return;
   if (!snapshot) {
-    container.innerHTML = '<div class="pool-row missing"><div>Waiting for pools</div><div class="pool-status">OFF</div></div>';
+    container.innerHTML = '<div class="pool-row"><div class="pool-info"><span class="pool-addr">Waiting for data</span></div></div>';
     return;
   }
+
   const poolMap = new Map();
   snapshot.curves.forEach((curve) => {
-    const address = extractAddress(curve.pool);
+    const address = extractAddr(curve.pool);
     if (!address) return;
-    const key = normalizeAddress(address);
-    if (!poolMap.has(key)) {
-      poolMap.set(key, { address, venues: new Set() });
-    }
+    const key = address.toLowerCase();
+    if (!poolMap.has(key)) poolMap.set(key, { address, venues: new Set() });
     poolMap.get(key).venues.add(curve.venue);
   });
 
   container.innerHTML = ALLOWED_POOLS.map((address) => {
-    const key = normalizeAddress(address);
+    const key = address.toLowerCase();
     const entry = poolMap.get(key);
-    const venues = entry
-      ? Array.from(entry.venues).map(venueLabel).join(', ')
-      : 'Not detected';
-    const rowClass = entry ? 'pool-row' : 'pool-row missing';
-    const status = entry ? 'LIVE' : 'OFF';
-    return `
-      <div class="${rowClass}">
-        <div>
-          <div class="pool-address">${shortAddress(address)}</div>
-          <div class="pool-venues">${venues}</div>
-        </div>
-        <div class="pool-status">${status}</div>
+    const venues = entry ? [...entry.venues].map(venueLabel).join(', ') : 'Not found';
+    const statusCls = entry ? 'live' : 'off';
+    const statusText = entry ? 'LIVE' : 'OFF';
+    return `<div class="pool-row">
+      <div class="pool-info">
+        <span class="pool-addr">${shortAddr(address)}</span>
+        <span class="pool-venue-tag">${venues}</span>
       </div>
-    `;
+      <span class="pool-status-badge ${statusCls}">${statusText}</span>
+    </div>`;
   }).join('');
 }
 
-function connectWs() {
-  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${protocol}://${location.host}/ws`);
-  ws.onopen = () => updateStatus('Live feed connected', 'ok');
-  ws.onmessage = (event) => {
-    try {
-      const payload = JSON.parse(event.data);
-      applySnapshot(payload);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-  ws.onclose = () => {
-    updateStatus('Live feed disconnected, retrying...', 'error');
-    setTimeout(connectWs, 3000);
-  };
+// ── Scale toggle ──
+
+function initScaleToggle() {
+  const container = document.getElementById('scale-toggle');
+  if (!container) return;
+  container.addEventListener('click', (e) => {
+    const btn = e.target.closest('.scale-btn');
+    if (!btn) return;
+    const mode = btn.dataset.mode;
+    state.scaleMode = mode;
+    container.querySelectorAll('.scale-btn').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderChart(state.snapshot);
+  });
 }
 
+// ── Init ──
+
 (function init() {
-  updateStatus('Loading snapshot...', 'loading');
+  updateStatus('Loading', 'loading');
+  initScaleToggle();
   renderPoolList(null);
+
   fetchLatest()
     .then((snapshot) => {
       applySnapshot(snapshot);
-      updateStatus('Snapshot loaded', 'ok');
+      updateStatus('Live', 'ok');
     })
     .catch(() => {
-      updateStatus('Waiting for first snapshot...', 'loading');
+      updateStatus('Waiting', 'loading');
     })
     .finally(() => {
       connectWs();
