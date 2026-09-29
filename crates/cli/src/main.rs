@@ -126,7 +126,7 @@ struct SnapshotArgs {
 struct ServeArgs {
     #[command(flatten)]
     common: CommonArgs,
-    #[arg(long, default_value = "0.0.0.0:8080")]
+    #[arg(long, default_value = "127.0.0.1:8080")]
     listen: String,
     #[arg(long, default_value_t = 10)]
     interval: u64,
@@ -281,8 +281,8 @@ async fn build_snapshot(common: &CommonArgs) -> anyhow::Result<SnapshotPayload> 
     let block_number = ctx.block_number().await?;
     let block_timestamp = ctx.block_timestamp(block_number).await?;
 
-    let base_address = resolve_address(common.base.clone(), "WETH_ADDRESS")?;
-    let quote_address = resolve_address(common.quote.clone(), "USDC_ADDRESS")?;
+    let base_address = resolve_address(common.base.clone(), "WETH_ADDRESS", DEFAULT_WETH)?;
+    let quote_address = resolve_address(common.quote.clone(), "USDC_ADDRESS", DEFAULT_USDC)?;
 
     let base = base_depth_evm::token::fetch_token_info(
         ctx.provider.clone(),
@@ -767,18 +767,24 @@ fn resolve_rpc_url(common: &CommonArgs) -> anyhow::Result<String> {
     if let Ok(url) = std::env::var("BASE_RPC_URL") {
         return Ok(url);
     }
-    Err(anyhow::anyhow!("BASE_RPC_URL missing"))
+    warn!("BASE_RPC_URL not set, falling back to the public endpoint {DEFAULT_RPC_URL} (rate limited)");
+    Ok(DEFAULT_RPC_URL.to_string())
 }
+
+/// Public Base RPC used when neither `--rpc-url` nor `BASE_RPC_URL` is set.
+const DEFAULT_RPC_URL: &str = "https://mainnet.base.org";
+/// Canonical WETH and native USDC on Base.
+const DEFAULT_WETH: &str = "0x4200000000000000000000000000000000000006";
+const DEFAULT_USDC: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
 fn resolve_address(
     value: Option<String>,
     env_key: &str,
+    default: &str,
 ) -> anyhow::Result<alloy_primitives::Address> {
-    let raw = if let Some(value) = value {
-        value
-    } else {
-        std::env::var(env_key)?
-    };
+    let raw = value
+        .or_else(|| std::env::var(env_key).ok())
+        .unwrap_or_else(|| default.to_string());
     parse_address(&raw)
 }
 
@@ -807,7 +813,6 @@ fn default_venues() -> Vec<Venue> {
         Venue::AerodromeV2,
         Venue::Kyber,
         Venue::Unified,
-        Venue::UnifiedKyber,
         Venue::TesseraSwap,
     ]
 }

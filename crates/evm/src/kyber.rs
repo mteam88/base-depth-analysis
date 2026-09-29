@@ -19,7 +19,7 @@ impl Default for KyberConfig {
     fn default() -> Self {
         Self {
             base_url: "https://aggregator-api.kyberswap.com/base/api/v1".to_string(),
-            client_id: "kyberswap".to_string(),
+            client_id: "base-depth-analysis".to_string(),
             exclude_rfq: true,
             only_direct: false,
             gas_include: false,
@@ -38,28 +38,14 @@ pub struct KyberQuoteEngine {
 impl KyberQuoteEngine {
     pub fn new(cfg: KyberConfig) -> anyhow::Result<Self> {
         let mut headers = HeaderMap::new();
-        headers.insert("accept", HeaderValue::from_static("*/*"));
-        headers.insert(
-            "accept-language",
-            HeaderValue::from_static("en-US,en;q=0.9"),
-        );
-        headers.insert("origin", HeaderValue::from_static("https://kyberswap.com"));
-        headers.insert(
-            "referer",
-            HeaderValue::from_static("https://kyberswap.com/"),
-        );
-        headers.insert(
-            "user-agent",
-            HeaderValue::from_static(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            ),
-        );
+        headers.insert("accept", HeaderValue::from_static("application/json"));
         headers.insert(
             "x-client-id",
             HeaderValue::from_str(cfg.client_id.as_str())?,
         );
 
         let client = reqwest::Client::builder()
+            .user_agent(concat!("base-depth-analysis/", env!("CARGO_PKG_VERSION")))
             .default_headers(headers)
             .timeout(Duration::from_secs(12))
             .build()?;

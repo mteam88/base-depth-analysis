@@ -96,19 +96,18 @@ impl V3PoolSimulator {
         let pool = IUniswapV3Pool::new(self.pool, self.provider.clone());
         let tick_i24 = I24::try_from(tick_idx)
             .map_err(|_| anyhow::anyhow!("tick out of range: {tick_idx}"))?;
-        let data = match self.block {
-            Some(block_number) => {
-                pool.ticks(tick_i24)
-                    .block(block_id(block_number))
-                    .call()
-                    .await?
-            }
-            None => pool.ticks(tick_i24).call().await?,
-        };
+        // Decoded by word so the same code handles Uniswap v3 (8 fields) and
+        // Slipstream (10 fields): liquidityGross and liquidityNet are the first two
+        // words in both, and `initialized` is always the last.
+        let calldata = pool.ticks(tick_i24).calldata().clone();
+        let data = raw_call(&self.provider, self.pool, calldata, self.block).await?;
+        let words = words(&data, 8)?;
         let tick = TickInfo {
-            liquidity_gross: data.liquidityGross,
-            liquidity_net: i128::try_from(data.liquidityNet).unwrap_or(0),
-            initialized: data.initialized,
+            liquidity_gross: u128::try_from(U256::from_be_slice(words[0]))
+                .map_err(|_| anyhow::anyhow!("liquidityGross overflow"))?,
+            liquidity_net: i128::try_from(I256::from_raw(U256::from_be_slice(words[1])))
+                .map_err(|_| anyhow::anyhow!("liquidityNet overflow"))?,
+            initialized: !U256::from_be_slice(words[words.len() - 1]).is_zero(),
         };
         self.ticks.insert(tick_idx, tick.clone());
         Ok(tick)
@@ -312,11 +311,14 @@ async fn fetch_v3_state(
     let pool_contract = IUniswapV3Pool::new(pool, provider.clone());
     let (slot0, liquidity, tick_spacing, fee, token0, token1) = match block {
         Some(block_number) => {
-            let slot0 = pool_contract
-                .slot0()
-                .block(block_id(block_number))
-                .call()
-                .await?;
+            let slot0 = raw_call(
+                &provider,
+                pool,
+                pool_contract.slot0().calldata().clone(),
+                Some(block_number),
+            )
+            .await
+            .and_then(|data| decode_slot0(&data))?;
             let liquidity = pool_contract
                 .liquidity()
                 .block(block_id(block_number))
@@ -345,7 +347,9 @@ async fn fetch_v3_state(
             (slot0, liquidity, tick_spacing, fee, token0, token1)
         }
         None => {
-            let slot0 = pool_contract.slot0().call().await?;
+            let slot0 = raw_call(&provider, pool, pool_contract.slot0().calldata().clone(), None)
+                .await
+                .and_then(|data| decode_slot0(&data))?;
             let liquidity = pool_contract.liquidity().call().await?;
             let tick_spacing = pool_contract.tickSpacing().call().await?;
             let fee = pool_contract.fee().call().await?;
@@ -360,8 +364,8 @@ async fn fetch_v3_state(
         token1,
         fee: fee.to::<u32>(),
         tick_spacing: signed_to_i32(tick_spacing),
-        sqrt_price_x96: U256::from(slot0.sqrtPriceX96),
-        tick: signed_to_i32(slot0.tick),
+        sqrt_price_x96: slot0.0,
+        tick: slot0.1,
         liquidity,
     })
 }
@@ -414,7 +418,7 @@ async fn fetch_v3_state_multicall(
     };
 
     let IMulticall3::aggregateReturn { returnData, .. } = result;
-    let slot0 = IUniswapV3Pool::slot0Call::abi_decode_returns(&returnData[0])?;
+    let slot0 = decode_slot0(&returnData[0])?;
     let liquidity = IUniswapV3Pool::liquidityCall::abi_decode_returns(&returnData[1])?;
     let tick_spacing = IUniswapV3Pool::tickSpacingCall::abi_decode_returns(&returnData[2])?;
     let fee = IUniswapV3Pool::feeCall::abi_decode_returns(&returnData[3])?;
@@ -426,8 +430,50 @@ async fn fetch_v3_state_multicall(
         token1,
         fee: fee.to::<u32>(),
         tick_spacing: signed_to_i32(tick_spacing),
-        sqrt_price_x96: U256::from(slot0.sqrtPriceX96),
-        tick: signed_to_i32(slot0.tick),
+        sqrt_price_x96: slot0.0,
+        tick: slot0.1,
         liquidity,
     })
+}
+
+/// `eth_call` returning raw bytes, for calls whose return layout differs between
+/// v3 forks (Slipstream's `slot0` has 6 fields, Uniswap's has 7).
+async fn raw_call(
+    provider: &Arc<RpcProvider>,
+    to: Address,
+    calldata: alloy_primitives::Bytes,
+    block: Option<u64>,
+) -> anyhow::Result<alloy_primitives::Bytes> {
+    use alloy::network::TransactionBuilder;
+    use alloy::providers::Provider;
+    use alloy::rpc::types::TransactionRequest;
+
+    let tx = TransactionRequest::default().with_to(to).with_input(calldata);
+    let call = provider.call(tx);
+    let out = match block {
+        Some(block_number) => call.block(block_id(block_number)).await?,
+        None => call.await?,
+    };
+    Ok(out)
+}
+
+fn words(data: &[u8], min_words: usize) -> anyhow::Result<Vec<&[u8]>> {
+    if data.len() < min_words * 32 {
+        return Err(anyhow::anyhow!(
+            "short return data: {} bytes, expected at least {}",
+            data.len(),
+            min_words * 32
+        ));
+    }
+    Ok(data.chunks_exact(32).collect())
+}
+
+/// Reads `(sqrtPriceX96, tick)` from the first two words of `slot0()`, which is
+/// the same across Uniswap v3, PancakeSwap v3 and Slipstream.
+fn decode_slot0(data: &[u8]) -> anyhow::Result<(U256, i32)> {
+    let words = words(data, 2)?;
+    let sqrt_price_x96 = U256::from_be_slice(words[0]);
+    let tick = i32::try_from(I256::from_raw(U256::from_be_slice(words[1])))
+        .map_err(|_| anyhow::anyhow!("tick out of range"))?;
+    Ok((sqrt_price_x96, tick))
 }

@@ -1,14 +1,16 @@
 use crate::addresses::Addresses;
-use crate::contracts::IUniswapV3Factory;
+use crate::contracts::{ISlipstreamFactory, IUniswapV3Factory};
 use crate::provider::{block_id, RpcContext};
 use crate::{aerodrome::AerodromePoolSimulator, v2::V2PoolSimulator, v3::V3PoolSimulator};
-use alloy_primitives::aliases::U24;
+use alloy_primitives::aliases::{I24, U24};
 use alloy_primitives::Address;
 use base_depth_core::{StatefulSimulator, TokenInfo, Venue};
 use std::sync::Arc;
 use tracing::warn;
 
 pub const DEFAULT_V3_FEES: &[u32] = &[100, 500, 3000, 10_000];
+/// Tick spacings enabled on the Aerodrome Slipstream factory on Base.
+pub const SLIPSTREAM_TICK_SPACINGS: &[i32] = &[1, 50, 100, 200, 2000];
 
 #[derive(Clone)]
 pub struct SimulatorEntry {
@@ -70,13 +72,11 @@ pub async fn discover_simulators(
             }
             Venue::Slipstream => {
                 for factory in &addresses.slipstream_factories {
-                    let sims = discover_v3_simulators(
+                    let sims = discover_slipstream_simulators(
                         provider.clone(),
                         *factory,
                         base,
                         quote,
-                        *venue,
-                        v3_fees,
                         block,
                         Some(addresses.multicall3),
                     )
@@ -202,7 +202,7 @@ pub async fn discover_v3_pools(
         if pool.is_zero() {
             continue;
         }
-        let label = format!("{}:{:?}:{}bps", venue.as_str(), pool, fee);
+        let label = format!("{}:{:?}:{}", venue.as_str(), pool, fee_label(*fee));
         entries.push(V3PoolEntry {
             venue,
             pool,
@@ -267,7 +267,70 @@ async fn discover_v3_simulators(
             multicall3,
         )
         .await?;
-        let label = format!("{}:{:?}:{}bps", venue.as_str(), pool, fee);
+        let label = format!("{}:{:?}:{}", venue.as_str(), pool, fee_label(*fee));
+        sim.pool_label = label.clone();
+        entries.push(SimulatorEntry {
+            venue,
+            pool,
+            label,
+            simulator: Box::new(sim),
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Fee tiers are in hundredths of a basis point (500 = 0.05%).
+fn fee_label(fee: u32) -> String {
+    format!("fee {}%", fee as f64 / 10_000.0)
+}
+
+async fn discover_slipstream_simulators(
+    provider: Arc<crate::provider::RpcProvider>,
+    factory: Address,
+    base: &TokenInfo,
+    quote: &TokenInfo,
+    block: Option<u64>,
+    multicall3: Option<Address>,
+) -> anyhow::Result<Vec<SimulatorEntry>> {
+    let factory_contract = ISlipstreamFactory::new(factory, provider.clone());
+    let venue = Venue::Slipstream;
+    let mut entries = Vec::new();
+
+    for spacing in SLIPSTREAM_TICK_SPACINGS {
+        let spacing_i24 = I24::try_from(*spacing)?;
+        let mut call = factory_contract.getPool(base.address, quote.address, spacing_i24);
+        if let Some(block_number) = block {
+            call = call.block(block_id(block_number));
+        }
+        let pool = match call.call().await {
+            Ok(pool) => pool,
+            Err(err) => {
+                warn!("failed to fetch slipstream pool for tick spacing {spacing}: {err}");
+                continue;
+            }
+        };
+        if pool.is_zero() {
+            continue;
+        }
+        let mut sim = V3PoolSimulator::from_pool(
+            provider.clone(),
+            pool,
+            base.clone(),
+            quote.clone(),
+            venue,
+            block,
+            multicall3,
+        )
+        .await?;
+        // Slipstream fees are dynamic per pool; report the fee read at this block.
+        let label = format!(
+            "{}:{:?}:ts {} {}",
+            venue.as_str(),
+            pool,
+            spacing,
+            fee_label(sim.fee)
+        );
         sim.pool_label = label.clone();
         entries.push(SimulatorEntry {
             venue,

@@ -18,6 +18,12 @@ sol! {
         function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
     }
 
+    /// Aerodrome Slipstream keys pools by tick spacing (int24), not by fee tier.
+    #[sol(rpc)]
+    interface ISlipstreamFactory {
+        function getPool(address tokenA, address tokenB, int24 tickSpacing) external view returns (address);
+    }
+
     #[sol(rpc)]
     interface IUniswapV3Pool {
         function slot0()

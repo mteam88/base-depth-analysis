@@ -353,9 +353,17 @@ function renderChart(snapshot) {
   });
 }
 
+// Aggregator curves are a benchmark, not a venue: they route through the same
+// pools and are sampled off-block, so they are left out of BBO and ladder stats.
+const AGGREGATOR_VENUES = new Set(['kyber', 'unified_kyber']);
+
+function venueCurves(curves) {
+  return curves.filter((c) => !AGGREGATOR_VENUES.has(c.venue));
+}
+
 function bestPrices(curves) {
   let bestBid = null, bestAsk = null, maxDepth = 0;
-  curves.forEach((curve) => {
+  venueCurves(curves).forEach((curve) => {
     if (!curve.points.length) return;
     const first = curve.points[0];
     maxDepth = Math.max(maxDepth, curve.points[curve.points.length - 1].cum_base);
@@ -405,8 +413,8 @@ function renderDepthTable(snapshot) {
 
   const maxBase = meta.config?.max_base || 100;
   const levels = [0.0025, 0.01, 0.05, 0.1, 0.25].map((r) => maxBase * r).filter((v) => v > 0).slice(0, 5);
-  const bids = curves.filter((c) => c.side === 'bid');
-  const asks = curves.filter((c) => c.side === 'ask');
+  const bids = venueCurves(curves).filter((c) => c.side === 'bid');
+  const asks = venueCurves(curves).filter((c) => c.side === 'ask');
 
   const header = `<div class="depth-row header"><span>Depth</span><span style="text-align:right">Bid</span><span style="text-align:right">Ask / Spread</span></div>`;
 
